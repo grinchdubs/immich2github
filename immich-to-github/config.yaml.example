@@ -1,0 +1,81 @@
+# Immich to GitHub Sync Configuration
+
+immich:
+  # API URL will be read from IMMICH_API_URL env variable
+  # API key will be read from IMMICH_API_KEY env variable
+
+  # Optional: Limit to specific albums
+  # albums: ["Portfolio", "Blog Photos"]
+
+github:
+  # Repository in format "username/repo-name"
+  repo: "grinchdubs/grnch.xyz_photos"
+
+  # Branch to commit to
+  branch: "main"
+
+  # Optional: Commit message template
+  # Available variables: {tag}, {count}, {date}
+  commit_message: "Add {count} photos from Immich tag '{tag}'"
+
+sync:
+  # Map Immich tags to GitHub folder paths
+  # Format: "immich-tag": "github-folder-path"
+  tag_mappings:
+    "pen-plotting": "plotting"
+    "laser-engraving": "laser"
+    "julia-experiments": "julia"
+    "sleeping-androids": "androids"
+
+  # Tags to exclude from sync (even if matched by tag_mappings)
+  exclude_tags:
+    - "private"
+    - "draft"
+    - "do-not-sync"
+
+  # Optional: File naming pattern
+  # Available variables: {original}, {tag}, {date}, {timestamp}, {index}
+  # Default: {original} (keeps original filename)
+  filename_pattern: "{original}"
+
+  # Optional: Maximum file size in MB (skip larger files)
+  max_file_size_mb: 50
+
+  # Optional: Allowed file extensions
+  allowed_extensions:
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+    - ".gif"
+    - ".webp"
+
+automation:
+  # Enable daemon mode
+  enabled: false
+
+  # Sync interval in minutes
+  interval_minutes: 60
+
+  # Tags to auto-sync (leave empty to sync all tag_mappings)
+  auto_sync_tags: []
+
+  # Retry failed uploads
+  retry_on_failure: true
+  max_retries: 3
+
+state:
+  # File to store sync state
+  file_path: ".sync_state.json"
+
+  # Backup state file
+  backup: true
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+
+  # Log file (leave empty for stdout only)
+  file: "immich-sync.log"
+
+  # Rich terminal output (colors, progress bars)
+  rich_output: true

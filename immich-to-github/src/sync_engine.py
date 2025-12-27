@@ -1,0 +1,275 @@
+"""Core sync engine that orchestrates Immich to GitHub synchronization."""
+
+import asyncio
+from pathlib import Path
+from typing import List, Optional, Set
+import tempfile
+
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+from .config import Config
+from .immich_client import ImmichClient, ImmichAsset
+from .github_client import GitHubClient
+from .state_manager import SyncState
+
+console = Console()
+
+
+class SyncEngine:
+    """Orchestrates synchronization between Immich and GitHub."""
+
+    def __init__(self, config: Config, dry_run: bool = False):
+        """Initialize sync engine.
+
+        Args:
+            config: Configuration object
+            dry_run: If True, only show what would be synced without uploading
+        """
+        self.config = config
+        self.dry_run = dry_run
+
+        # Initialize clients
+        self.immich_client = ImmichClient(
+            config.immich.api_url, config.immich.api_key
+        )
+        self.github_client = GitHubClient(
+            config.github_token, config.github_repo, config.github_branch
+        )
+        self.state = SyncState(
+            config.state_file_path, config.state_backup_enabled
+        )
+
+    async def test_connections(self) -> bool:
+        """Test connections to Immich and GitHub.
+
+        Returns:
+            True if both connections are successful, False otherwise
+        """
+        console.print("[bold]Testing connections...[/bold]")
+
+        immich_ok = await self.immich_client.test_connection()
+        github_ok = self.github_client.test_connection()
+
+        if immich_ok:
+            console.print("[green]✓ Immich connection successful[/green]")
+        else:
+            console.print("[red]✗ Immich connection failed[/red]")
+
+        if github_ok:
+            console.print(f"[green]✓ GitHub repository '{self.config.github_repo}' accessible[/green]")
+        else:
+            console.print("[red]✗ GitHub connection failed[/red]")
+
+        return immich_ok and github_ok
+
+    def _should_sync_asset(self, asset: ImmichAsset) -> bool:
+        """Check if an asset should be synced.
+
+        Args:
+            asset: Immich asset to check
+
+        Returns:
+            True if asset should be synced, False otherwise
+        """
+        # Check if already synced
+        if self.state.is_synced(asset.id):
+            return False
+
+        # Check file extension
+        file_ext = Path(asset.original_filename).suffix.lower()
+        if file_ext not in self.config.allowed_extensions:
+            return False
+
+        # Check excluded tags
+        if any(tag in self.config.exclude_tags for tag in asset.tags):
+            return False
+
+        return True
+
+    def _get_github_path(self, asset: ImmichAsset, tag: str) -> str:
+        """Generate GitHub path for an asset.
+
+        Args:
+            asset: Immich asset
+            tag: Tag being synced
+
+        Returns:
+            Path in GitHub repository
+        """
+        # Get folder from tag mapping
+        folder = self.config.tag_mappings.get(tag, tag)
+
+        # Apply filename pattern
+        filename_pattern = self.config.filename_pattern
+        filename = filename_pattern.format(
+            original=asset.original_filename,
+            tag=tag,
+            date=asset.file_created_at[:10] if asset.file_created_at else "unknown",
+            timestamp=asset.file_created_at.replace(":", "-") if asset.file_created_at else "unknown",
+        )
+
+        return f"{folder}/{filename}"
+
+    async def sync_tag(
+        self,
+        tag: str,
+        force: bool = False,
+    ) -> dict:
+        """Sync assets with a specific tag.
+
+        Args:
+            tag: Tag to sync
+            force: If True, re-upload even if already synced
+
+        Returns:
+            Dictionary with sync results
+        """
+        console.print(f"\n[bold cyan]Syncing tag: {tag}[/bold cyan]")
+
+        # Check if tag is mapped
+        if tag not in self.config.tag_mappings:
+            console.print(f"[yellow]Warning: Tag '{tag}' not in tag_mappings. Using tag name as folder.[/yellow]")
+
+        # Fetch assets from Immich
+        console.print(f"[dim]Fetching assets with tag '{tag}' from Immich...[/dim]")
+        assets = await self.immich_client.get_assets_by_tag(tag)
+        console.print(f"[dim]Found {len(assets)} assets with tag '{tag}'[/dim]")
+
+        # Filter assets that need syncing
+        if not force:
+            assets_to_sync = [a for a in assets if self._should_sync_asset(a)]
+            skipped = len(assets) - len(assets_to_sync)
+            if skipped > 0:
+                console.print(f"[dim]Skipping {skipped} already synced assets[/dim]")
+        else:
+            assets_to_sync = assets
+            console.print("[yellow]Force mode: re-syncing all assets[/yellow]")
+
+        if not assets_to_sync:
+            console.print("[green]No new assets to sync![/green]")
+            return {
+                "tag": tag,
+                "total": len(assets),
+                "synced": 0,
+                "skipped": len(assets),
+                "failed": 0,
+            }
+
+        # Dry run mode
+        if self.dry_run:
+            console.print(f"\n[yellow]DRY RUN: Would sync {len(assets_to_sync)} assets:[/yellow]")
+            for asset in assets_to_sync:
+                github_path = self._get_github_path(asset, tag)
+                console.print(f"  • {asset.original_filename} → {github_path}")
+            return {
+                "tag": tag,
+                "total": len(assets),
+                "synced": 0,
+                "skipped": 0,
+                "failed": 0,
+                "dry_run": True,
+            }
+
+        # Sync assets
+        synced = 0
+        failed = 0
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console,
+        ) as progress:
+            task = progress.add_task(
+                f"Syncing {len(assets_to_sync)} assets...",
+                total=len(assets_to_sync),
+            )
+
+            for asset in assets_to_sync:
+                try:
+                    # Download asset to temp directory
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        temp_path = Path(temp_dir)
+                        local_file = await self.immich_client.download_asset(
+                            asset.id, temp_path, asset.original_filename
+                        )
+
+                        # Check file size
+                        if self.config.max_file_size_mb:
+                            size_mb = local_file.stat().st_size / (1024 * 1024)
+                            if size_mb > self.config.max_file_size_mb:
+                                console.print(
+                                    f"[yellow]Skipping {asset.original_filename}: "
+                                    f"size {size_mb:.1f}MB exceeds limit[/yellow]"
+                                )
+                                progress.advance(task)
+                                continue
+
+                        # Upload to GitHub
+                        github_path = self._get_github_path(asset, tag)
+                        commit_msg = self.config.commit_message_template.format(
+                            tag=tag,
+                            count=1,
+                            date=asset.file_created_at[:10] if asset.file_created_at else "unknown",
+                        )
+
+                        url = self.github_client.upload_file(
+                            local_file,
+                            github_path,
+                            commit_msg,
+                            overwrite=force,
+                        )
+
+                        # Mark as synced
+                        self.state.mark_synced(
+                            asset.id,
+                            github_path,
+                            checksum=asset.checksum,
+                            url=url,
+                        )
+                        synced += 1
+
+                except Exception as e:
+                    console.print(f"[red]Failed to sync {asset.original_filename}: {e}[/red]")
+                    failed += 1
+
+                progress.advance(task)
+
+        # Save state
+        if synced > 0:
+            self.state.save_state()
+
+        # Summary
+        console.print(f"\n[bold green]Sync completed for tag '{tag}':[/bold green]")
+        console.print(f"  • Synced: {synced}")
+        console.print(f"  • Failed: {failed}")
+        console.print(f"  • Total processed: {len(assets_to_sync)}")
+
+        return {
+            "tag": tag,
+            "total": len(assets),
+            "synced": synced,
+            "skipped": len(assets) - len(assets_to_sync),
+            "failed": failed,
+        }
+
+    async def sync_all_tags(self, force: bool = False) -> List[dict]:
+        """Sync all configured tags.
+
+        Args:
+            force: If True, re-upload even if already synced
+
+        Returns:
+            List of sync results for each tag
+        """
+        results = []
+        for tag in self.config.tag_mappings.keys():
+            result = await self.sync_tag(tag, force=force)
+            results.append(result)
+        return results
+
+    async def close(self) -> None:
+        """Close all clients."""
+        await self.immich_client.close()
