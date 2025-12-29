@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  immich-sync:
+    build: .
+    container_name: immich-to-github-sync
+    restart: unless-stopped
+    volumes:
+      # Mount config files
+      - ./config.yaml:/app/config.yaml:ro
+      - ./.env:/app/.env:ro
+
+      # Mount data directory for state file
+      - ./data:/data
+
+    environment:
+      # Override state file path to use mounted volume
+      - STATE_FILE_PATH=/data/.sync_state.json
+
+    # Default command - override to run different commands
+    # Examples:
+    #   docker-compose run --rm immich-sync python -m src.cli sync --all
+    #   docker-compose run --rm immich-sync python -m src.cli test
+    #   docker-compose up  # Runs daemon mode
+    command: python -m src.cli daemon --config /app/config.yaml
+
+  # One-shot sync service (use with docker-compose run)
+  sync-once:
+    build: .
+    container_name: immich-sync-once
+    profiles: ["manual"]  # Only runs when explicitly called
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./.env:/app/.env:ro
+      - ./data:/data
+    environment:
+      - STATE_FILE_PATH=/data/.sync_state.json
+    command: python -m src.cli sync --all --config /app/config.yaml

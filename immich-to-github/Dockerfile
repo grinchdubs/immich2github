@@ -1,0 +1,25 @@
+# Immich to GitHub Sync Tool - Docker Image
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY src/ ./src/
+COPY setup.py .
+
+# Install the package
+RUN pip install -e .
+
+# Create directory for state file
+RUN mkdir -p /data
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+
+# Default command (can be overridden)
+CMD ["python", "-m", "src.cli", "--help"]

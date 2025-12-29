@@ -13,6 +13,34 @@ Automatically sync photos from your Immich instance to GitHub based on tags. Per
 
 ## Quick Start
 
+### 🐳 Docker Deployment (Recommended for Local Immich)
+
+**Perfect for running inside your network where Immich is accessible!**
+
+```bash
+# Clone and setup
+git clone https://github.com/grinchdubs/immich2github.git
+cd immich2github/immich-to-github
+
+# Configure
+cp .env.example .env
+cp config.yaml.example config.yaml
+# Edit .env and config.yaml with your settings
+
+# Create data directory
+mkdir -p data
+
+# Run daemon mode (automated background sync)
+docker-compose up -d
+
+# OR run one-time sync
+docker-compose run --rm immich-sync python -m src.cli sync --all --config /app/config.yaml
+```
+
+📖 **See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for complete Docker deployment guide**
+
+### 🐍 Python Installation
+
 ### Prerequisites
 
 - Python 3.10 or higher
