@@ -25,6 +25,12 @@ def cli():
 
 @cli.command()
 @click.option(
+    "--album",
+    "-a",
+    help="Specific album to sync",
+    type=str,
+)
+@click.option(
     "--tag",
     "-t",
     help="Specific tag to sync",
@@ -32,10 +38,9 @@ def cli():
 )
 @click.option(
     "--all",
-    "-a",
     "sync_all",
     is_flag=True,
-    help="Sync all configured tags",
+    help="Sync all configured albums and tags",
 )
 @click.option(
     "--dry-run",
@@ -62,15 +67,15 @@ def cli():
     is_flag=True,
     help="Verbose output",
 )
-def sync(tag, sync_all, dry_run, force, config, verbose):
+def sync(album, tag, sync_all, dry_run, force, config, verbose):
     """Sync photos from Immich to GitHub."""
 
-    if not tag and not sync_all:
-        console.print("[red]Error: Must specify either --tag or --all[/red]")
+    if not album and not tag and not sync_all:
+        console.print("[red]Error: Must specify --album, --tag, or --all[/red]")
         sys.exit(1)
 
-    if tag and sync_all:
-        console.print("[red]Error: Cannot use both --tag and --all[/red]")
+    if sum([bool(album), bool(tag), bool(sync_all)]) > 1:
+        console.print("[red]Error: Can only use one of --album, --tag, or --all[/red]")
         sys.exit(1)
 
     try:
@@ -89,8 +94,20 @@ def sync(tag, sync_all, dry_run, force, config, verbose):
 
             # Sync
             if sync_all:
-                results = await engine.sync_all_tags(force=force)
-            else:
+                # Sync both albums and tags
+                results = []
+                if cfg.album_mappings:
+                    console.print("\n[bold]Syncing Albums:[/bold]")
+                    album_results = await engine.sync_all_albums(force=force)
+                    results.extend(album_results)
+                if cfg.tag_mappings:
+                    console.print("\n[bold]Syncing Tags:[/bold]")
+                    tag_results = await engine.sync_all_tags(force=force)
+                    results.extend(tag_results)
+            elif album:
+                result = await engine.sync_album(album, force=force)
+                results = [result]
+            else:  # tag
                 result = await engine.sync_tag(tag, force=force)
                 results = [result]
 
@@ -224,15 +241,16 @@ def daemon(config):
 def _display_results_table(results):
     """Display sync results in a table."""
     table = Table(title="Sync Results")
-    table.add_column("Tag", style="cyan")
+    table.add_column("Tag/Album", style="cyan")
     table.add_column("Total", style="dim")
     table.add_column("Synced", style="green")
     table.add_column("Skipped", style="yellow")
     table.add_column("Failed", style="red")
 
     for result in results:
+        name = result.get("tag") or result.get("album", "Unknown")
         table.add_row(
-            result["tag"],
+            name,
             str(result["total"]),
             str(result["synced"]),
             str(result["skipped"]),

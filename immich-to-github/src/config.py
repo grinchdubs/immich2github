@@ -73,7 +73,12 @@ class Config:
     @property
     def tag_mappings(self) -> Dict[str, str]:
         """Get tag to folder mappings."""
-        return self._yaml_config["sync"]["tag_mappings"]
+        return self._yaml_config["sync"].get("tag_mappings", {})
+
+    @property
+    def album_mappings(self) -> Dict[str, str]:
+        """Get album to folder mappings."""
+        return self._yaml_config["sync"].get("album_mappings", {})
 
     @property
     def exclude_tags(self) -> List[str]:

@@ -19,7 +19,15 @@ class ImmichAsset:
         self.original_filename: str = data.get("originalFileName", "unknown.jpg")
         self.file_created_at: str = data.get("fileCreatedAt", "")
         self.file_modified_at: str = data.get("fileModifiedAt", "")
-        self.tags: List[str] = [tag["value"] for tag in data.get("tags", [])]
+        # Safely handle tags - they might be missing or not in the expected format
+        tags_data = data.get("tags", [])
+        if isinstance(tags_data, list):
+            self.tags: List[str] = [
+                tag.get("value", tag) if isinstance(tag, dict) else str(tag)
+                for tag in tags_data
+            ]
+        else:
+            self.tags: List[str] = []
         self.checksum: Optional[str] = data.get("checksum")
 
     def __repr__(self) -> str:
@@ -51,16 +59,36 @@ class ImmichClient:
         await self.client.aclose()
 
     async def get_all_assets(self) -> List[ImmichAsset]:
-        """Fetch all assets from Immich.
+        """Fetch all assets from Immich using the search API.
 
         Returns:
             List of ImmichAsset objects
         """
         try:
-            response = await self.client.get(f"{self.api_url}/api/asset")
+            # Use the new Immich search API
+            response = await self.client.post(
+                f"{self.api_url}/api/search/metadata",
+                json={}  # Empty search returns all assets
+            )
             response.raise_for_status()
-            assets_data = response.json()
-            return [ImmichAsset(asset) for asset in assets_data]
+            data = response.json()
+            
+            # The API returns {assets: {items: [...], total: X}, albums: {...}}
+            assets_wrapper = data.get("assets", {})
+            assets_data = assets_wrapper.get("items", [])
+            console.print(f"[dim]Fetched {len(assets_data)} assets from Immich[/dim]")
+            
+            # Parse assets with error handling
+            parsed_assets = []
+            for i, asset in enumerate(assets_data):
+                try:
+                    parsed_assets.append(ImmichAsset(asset))
+                except Exception as e:
+                    if i < 2:  # Only show first few errors with full details
+                        console.print(f"[yellow]Warning: Failed to parse asset #{i}: {e}[/yellow]")
+                    continue
+            
+            return parsed_assets
         except httpx.HTTPStatusError as e:
             console.print(f"[red]HTTP error fetching assets: {e}[/red]")
             raise
@@ -79,6 +107,56 @@ class ImmichClient:
         """
         all_assets = await self.get_all_assets()
         return [asset for asset in all_assets if tag in asset.tags]
+
+    async def get_albums(self) -> List[Dict[str, Any]]:
+        """Fetch all albums from Immich.
+
+        Returns:
+            List of album dictionaries
+        """
+        try:
+            response = await self.client.get(f"{self.api_url}/api/albums")
+            response.raise_for_status()
+            albums = response.json()
+            return albums
+        except httpx.HTTPStatusError as e:
+            console.print(f"[red]HTTP error fetching albums: {e}[/red]")
+            raise
+        except Exception as e:
+            console.print(f"[red]Error fetching albums: {e}[/red]")
+            raise
+
+    async def get_album_assets(self, album_id: str) -> List[ImmichAsset]:
+        """Fetch all assets from a specific album.
+
+        Args:
+            album_id: ID of the album
+
+        Returns:
+            List of ImmichAsset objects in the album
+        """
+        try:
+            response = await self.client.get(f"{self.api_url}/api/albums/{album_id}")
+            response.raise_for_status()
+            album_data = response.json()
+            assets_data = album_data.get("assets", [])
+            console.print(f"[dim]Fetched {len(assets_data)} assets from album[/dim]")
+            
+            parsed_assets = []
+            for asset in assets_data:
+                try:
+                    parsed_assets.append(ImmichAsset(asset))
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Failed to parse album asset: {e}[/yellow]")
+                    continue
+            
+            return parsed_assets
+        except httpx.HTTPStatusError as e:
+            console.print(f"[red]HTTP error fetching album assets: {e}[/red]")
+            raise
+        except Exception as e:
+            console.print(f"[red]Error fetching album assets: {e}[/red]")
+            raise
 
     async def download_asset(
         self, asset_id: str, output_path: Path, filename: Optional[str] = None
@@ -99,7 +177,7 @@ class ImmichClient:
 
             # Download the asset
             response = await self.client.get(
-                f"{self.api_url}/api/asset/file/{asset_id}",
+                f"{self.api_url}/api/assets/{asset_id}/original",
                 follow_redirects=True,
             )
             response.raise_for_status()
@@ -154,7 +232,7 @@ class ImmichClient:
             True if connection is successful, False otherwise
         """
         try:
-            response = await self.client.get(f"{self.api_url}/api/server-info/ping")
+            response = await self.client.get(f"{self.api_url}/api/server/ping")
             return response.status_code == 200
         except Exception as e:
             console.print(f"[red]Connection test failed: {e}[/red]")

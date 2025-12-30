@@ -255,6 +255,192 @@ class SyncEngine:
             "failed": failed,
         }
 
+    async def sync_album(
+        self, album_name: str, force: bool = False
+    ) -> dict:
+        """Sync a specific album from Immich to GitHub.
+
+        Args:
+            album_name: Name of the album to sync
+            force: If True, re-upload even if already synced
+
+        Returns:
+            Dictionary with sync statistics
+        """
+        # Get folder from album mapping
+        folder = self.config.album_mappings.get(album_name, album_name)
+
+        console.print(f"\n[bold cyan]Syncing album: {album_name}[/bold cyan]")
+        console.print(f"[dim]Target folder: {folder}[/dim]")
+
+        # Warning if album not in config
+        if album_name not in self.config.album_mappings:
+            console.print(f"[yellow]Warning: Album '{album_name}' not in album_mappings. Using album name as folder.[/yellow]")
+
+        # Fetch albums and find the matching one
+        console.print(f"Fetching album '{album_name}' from Immich...")
+        albums = await self.immich_client.get_albums()
+        album = next((a for a in albums if a.get("albumName") == album_name), None)
+        
+        if not album:
+            console.print(f"[red]Album '{album_name}' not found in Immich[/red]")
+            return {
+                "album": album_name,
+                "total": 0,
+                "synced": 0,
+                "skipped": 0,
+                "failed": 0,
+                "error": "Album not found"
+            }
+
+        # Fetch assets from the album
+        assets = await self.immich_client.get_album_assets(album["id"])
+        console.print(f"Found {len(assets)} assets in album '{album_name}'")
+
+        if not assets:
+            console.print("[yellow]No assets to sync![/yellow]")
+            return {
+                "album": album_name,
+                "total": 0,
+                "synced": 0,
+                "skipped": 0,
+                "failed": 0,
+            }
+
+        # Filter already synced assets (unless force=True)
+        assets_to_sync = []
+        skipped = 0
+        for asset in assets:
+            if not force and self.state.is_synced(asset.id):
+                skipped += 1
+                continue
+            assets_to_sync.append(asset)
+
+        if skipped > 0 and not self.dry_run:
+            console.print(f"[dim]Skipping {skipped} already synced assets[/dim]")
+
+        if not assets_to_sync:
+            console.print("[green]All assets already synced![/green]")
+            return {
+                "album": album_name,
+                "total": len(assets),
+                "synced": 0,
+                "skipped": len(assets),
+                "failed": 0,
+            }
+
+        # Dry run mode
+        if self.dry_run:
+            console.print(f"\n[yellow]DRY RUN: Would sync {len(assets_to_sync)} assets:[/yellow]")
+            for i, asset in enumerate(assets_to_sync[:10]):  # Show first 10
+                github_path = f"{folder}/{asset.original_filename}"
+                console.print(f"  • {asset.original_filename} → {github_path}")
+            if len(assets_to_sync) > 10:
+                console.print(f"  ... and {len(assets_to_sync) - 10} more")
+            return {
+                "album": album_name,
+                "total": len(assets),
+                "synced": 0,
+                "skipped": skipped,
+                "failed": 0,
+                "dry_run": True,
+            }
+
+        # Sync assets
+        synced = 0
+        failed = 0
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console,
+        ) as progress:
+            task = progress.add_task(
+                f"Syncing {len(assets_to_sync)} assets...",
+                total=len(assets_to_sync),
+            )
+
+            for asset in assets_to_sync:
+                try:
+                    # Download asset to temp directory
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        temp_path = Path(temp_dir)
+                        local_file = await self.immich_client.download_asset(
+                            asset.id, temp_path, asset.original_filename
+                        )
+
+                        # Check file size
+                        if self.config.max_file_size_mb:
+                            size_mb = local_file.stat().st_size / (1024 * 1024)
+                            if size_mb > self.config.max_file_size_mb:
+                                console.print(
+                                    f"[yellow]Skipping {asset.original_filename}: "
+                                    f"size {size_mb:.1f}MB exceeds limit[/yellow]"
+                                )
+                                progress.advance(task)
+                                continue
+
+                        # Upload to GitHub
+                        github_path = f"{folder}/{asset.original_filename}"
+                        commit_msg = f"Add {asset.original_filename} from album {album_name}"
+
+                        url = self.github_client.upload_file(
+                            local_file,
+                            github_path,
+                            commit_msg,
+                            overwrite=force,
+                        )
+
+                        # Mark as synced
+                        self.state.mark_synced(
+                            asset.id,
+                            github_path,
+                            checksum=asset.checksum,
+                            url=url,
+                        )
+                        synced += 1
+
+                except Exception as e:
+                    console.print(f"[red]Failed to sync {asset.original_filename}: {e}[/red]")
+                    failed += 1
+
+                progress.advance(task)
+
+        # Save state
+        if synced > 0:
+            self.state.save_state()
+
+        # Summary
+        console.print(f"\n[bold green]Sync completed for album '{album_name}':[/bold green]")
+        console.print(f"  • Synced: {synced}")
+        console.print(f"  • Failed: {failed}")
+        console.print(f"  • Total processed: {len(assets_to_sync)}")
+
+        return {
+            "album": album_name,
+            "total": len(assets),
+            "synced": synced,
+            "skipped": skipped,
+            "failed": failed,
+        }
+
+    async def sync_all_albums(self, force: bool = False) -> List[dict]:
+        """Sync all configured albums.
+
+        Args:
+            force: If True, re-upload even if already synced
+
+        Returns:
+            List of sync results for each album
+        """
+        results = []
+        for album_name in self.config.album_mappings.keys():
+            result = await self.sync_album(album_name, force=force)
+            results.append(result)
+        return results
+
     async def sync_all_tags(self, force: bool = False) -> List[dict]:
         """Sync all configured tags.
 

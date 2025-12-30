@@ -5,6 +5,8 @@ services:
     build: .
     container_name: immich-to-github-sync
     restart: unless-stopped
+    extra_hosts:
+      - "grnchnas:100.79.159.107"
     volumes:
       # Mount config files
       - ./config.yaml:/app/config.yaml:ro
