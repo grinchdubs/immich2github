@@ -41,13 +41,11 @@ sync:
   # Optional: Maximum file size in MB (skip larger files)
   max_file_size_mb: 50
 
-  # Optional: Allowed file extensions
+  # Optional: Allowed file extensions (only images, no videos or webp)
   allowed_extensions:
     - ".jpg"
     - ".jpeg"
     - ".png"
-    - ".gif"
-    - ".webp"
 
 automation:
   # Enable daemon mode

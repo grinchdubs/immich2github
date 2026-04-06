@@ -99,7 +99,7 @@ class Config:
     def allowed_extensions(self) -> List[str]:
         """Get allowed file extensions."""
         return self._yaml_config["sync"].get(
-            "allowed_extensions", [".jpg", ".jpeg", ".png", ".gif", ".webp"]
+            "allowed_extensions", [".jpg", ".jpeg", ".png"]
         )
 
     @property

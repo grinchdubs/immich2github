@@ -307,13 +307,26 @@ class SyncEngine:
                 "failed": 0,
             }
 
-        # Filter already synced assets (unless force=True)
+        # Filter assets based on extension, tags, and sync state
         assets_to_sync = []
         skipped = 0
         for asset in assets:
+            # Check file extension first (before downloading)
+            file_ext = Path(asset.original_filename).suffix.lower()
+            if file_ext not in self.config.allowed_extensions:
+                skipped += 1
+                continue
+            
+            # Check excluded tags
+            if any(tag in self.config.exclude_tags for tag in asset.tags):
+                skipped += 1
+                continue
+            
+            # Check if already synced (unless force=True)
             if not force and self.state.is_synced(asset.id):
                 skipped += 1
                 continue
+            
             assets_to_sync.append(asset)
 
         if skipped > 0 and not self.dry_run:
