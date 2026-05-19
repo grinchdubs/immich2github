@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d/Users/PC/Documents/GitHub/pwnagotchi-projects/immich2github/.venv/**)",
+      "Bash(\"D:/Users/PC/Documents/GitHub/pwnagotchi-projects/immich2github/.venv/Scripts/pip.exe\" install:*)"
+    ]
+  }
+}
