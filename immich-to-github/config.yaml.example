@@ -19,6 +19,11 @@ github:
   commit_message: "Add {count} photos from Immich tag '{tag}'"
 
 sync:
+  # Map Immich ALBUM names to GitHub folder paths (matched by name, not ID)
+  # Format: "Album Name": "github-folder-path"
+  album_mappings:
+    "Risograph": "risograph"
+
   # Map Immich tags to GitHub folder paths
   # Format: "immich-tag": "github-folder-path"
   tag_mappings:
@@ -53,6 +58,9 @@ automation:
 
   # Sync interval in minutes
   interval_minutes: 60
+
+  # Albums to auto-sync in daemon mode (leave empty to sync all album_mappings)
+  auto_sync_albums: ["Risograph"]
 
   # Tags to auto-sync (leave empty to sync all tag_mappings)
   auto_sync_tags: []

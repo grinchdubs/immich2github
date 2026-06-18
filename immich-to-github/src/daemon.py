@@ -3,6 +3,7 @@
 import asyncio
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -44,6 +45,24 @@ class SyncDaemon:
                     console.print("[red]Connection test failed, skipping sync cycle[/red]")
                     await self.engine.close()
                     return
+
+                # Determine which albums to sync (auto_sync_albums, else all mapped)
+                albums_to_sync = self.config.auto_sync_albums
+                if not albums_to_sync:
+                    albums_to_sync = list(self.config.album_mappings.keys())
+
+                # Sync each album
+                for album_name in albums_to_sync:
+                    try:
+                        result = await self.engine.sync_album(album_name, force=False)
+                        console.print(
+                            f"[green]Album '{album_name}': {result['synced']} synced, "
+                            f"{result['skipped']} skipped, {result['failed']} failed[/green]"
+                        )
+                    except Exception as e:
+                        console.print(f"[red]Error syncing album '{album_name}': {e}[/red]")
+                        if self.config.retry_on_failure:
+                            console.print("[yellow]Will retry in next cycle[/yellow]")
 
                 # Determine which tags to sync
                 tags_to_sync = self.config.auto_sync_tags
@@ -87,7 +106,9 @@ class SyncDaemon:
         console.print(f"  • Sync interval: {interval_minutes} minutes")
         console.print(f"  • Repository: {self.config.github_repo}")
         console.print(f"  • Branch: {self.config.github_branch}")
-        console.print(f"  • Tags: {', '.join(self.config.tag_mappings.keys())}")
+        albums = self.config.auto_sync_albums or list(self.config.album_mappings.keys())
+        console.print(f"  • Albums: {', '.join(albums) or '(none)'}")
+        console.print(f"  • Tags: {', '.join(self.config.tag_mappings.keys()) or '(none)'}")
 
         # Schedule sync
         schedule.every(interval_minutes).minutes.do(self._run_sync)
@@ -110,7 +131,7 @@ class SyncDaemon:
         try:
             while self.running:
                 schedule.run_pending()
-                asyncio.sleep(1)
+                time.sleep(1)
         except KeyboardInterrupt:
             self._shutdown()
 

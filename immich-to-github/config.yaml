@@ -1,0 +1,57 @@
+# Immich to GitHub Sync Configuration
+# Secrets (Immich URL/key, GitHub token) come from .env — see .env.example.
+
+immich:
+  # API URL and key are read from the IMMICH_API_URL / IMMICH_API_KEY env vars.
+
+github:
+  # TODO: confirm this is the repo your grnch.xyz site pulls photos from.
+  repo: "grinchdubs/grnch.xyz_photos"
+  branch: "main"
+  commit_message: "Add {count} photo(s) from Immich album '{tag}'"
+
+sync:
+  # Immich album name -> folder path in the GitHub repo.
+  # NOTE: matched by album NAME, not ID. Album a0623c19-... is "Risograph".
+  album_mappings:
+    "Risograph": "risograph"
+
+  # No tag-based syncing; album only.
+  tag_mappings: {}
+
+  exclude_tags:
+    - "private"
+    - "draft"
+    - "do-not-sync"
+
+  filename_pattern: "{original}"
+  max_file_size_mb: 50
+  allowed_extensions:
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+
+automation:
+  # Daemon mode: poll Immich on a short interval so new photos in the album
+  # appear on the site within ~2 minutes (Immich has no push/webhooks).
+  enabled: true
+  interval_minutes: 2
+
+  # Only auto-sync the Risograph album.
+  auto_sync_albums:
+    - "Risograph"
+  auto_sync_tags: []
+
+  retry_on_failure: true
+  max_retries: 3
+
+state:
+  # MUST live on the mounted /data volume so sync state survives restarts.
+  # (config.py reads this YAML value; the STATE_FILE_PATH env var is ignored.)
+  file_path: "/data/.sync_state.json"
+  backup: true
+
+logging:
+  level: "INFO"
+  file: ""
+  rich_output: true

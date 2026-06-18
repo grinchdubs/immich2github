@@ -42,9 +42,9 @@ env/
 htmlcov/
 .tox/
 
-# Config files (will be mounted)
+# Secrets and state are NOT baked into the image (secrets via env vars,
+# state via mounted /data volume). config.yaml IS baked in (no secrets).
 .env
-config.yaml
 .sync_state.json
 *.backup
 

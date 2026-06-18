@@ -118,6 +118,11 @@ class Config:
         return self._yaml_config.get("automation", {}).get("auto_sync_tags", [])
 
     @property
+    def auto_sync_albums(self) -> List[str]:
+        """Get albums to auto-sync (matched by album name)."""
+        return self._yaml_config.get("automation", {}).get("auto_sync_albums", [])
+
+    @property
     def retry_on_failure(self) -> bool:
         """Check if retry on failure is enabled."""
         return self._yaml_config.get("automation", {}).get("retry_on_failure", True)

@@ -1,8 +1,8 @@
-# Environment variables
+# Environment variables (secrets live here — never commit)
 .env
 
-# Configuration (may contain sensitive data)
-config.yaml
+# NOTE: config.yaml is intentionally tracked so CI can bake it into the image.
+# Keep it free of secrets — Immich URL/key and the GitHub token come from .env.
 
 # Sync state
 .sync_state.json
