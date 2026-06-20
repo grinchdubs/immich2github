@@ -1,4 +1,5 @@
 name: Build and Publish Docker image
+# Publishes ghcr.io/grinchdubs/immich2github:latest for the TrueNAS Custom App.
 
 # Builds the sync image in the cloud and pushes it to GitHub Container
 # Registry (ghcr.io) so TrueNAS can pull it. No local Docker needed.
