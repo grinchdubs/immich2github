@@ -1,17 +1,17 @@
 name: Build and Publish Docker image
 # Publishes ghcr.io/grinchdubs/immich2github:latest for the TrueNAS Custom App.
+# NOTE: the project lives in the immich-to-github/ subdirectory, so the build
+# context and Dockerfile path point there, and the path filters watch that dir.
 
-# Builds the sync image in the cloud and pushes it to GitHub Container
-# Registry (ghcr.io) so TrueNAS can pull it. No local Docker needed.
 on:
   push:
     branches: [main]
     paths:
-      - "src/**"
-      - "config.yaml"
-      - "requirements.txt"
-      - "setup.py"
-      - "Dockerfile"
+      - "immich-to-github/src/**"
+      - "immich-to-github/config.yaml"
+      - "immich-to-github/requirements.txt"
+      - "immich-to-github/setup.py"
+      - "immich-to-github/Dockerfile"
       - ".github/workflows/docker-publish.yml"
   workflow_dispatch:
 
@@ -39,7 +39,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./immich-to-github
+          file: ./immich-to-github/Dockerfile
           push: true
           tags: |
             ${{ steps.img.outputs.name }}:latest
