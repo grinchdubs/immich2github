@@ -29,7 +29,6 @@ setup(
     python_requires=">=3.10",
     install_requires=[
         "httpx>=0.27.0",
-        "PyGithub>=2.1.1",
         "click>=8.1.7",
         "rich>=13.7.0",
         "pydantic>=2.5.3",

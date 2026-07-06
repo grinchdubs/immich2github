@@ -20,10 +20,14 @@ class ImmichConfig(BaseSettings):
         extra = "ignore"
 
 
-class GitHubConfig(BaseSettings):
-    """GitHub configuration."""
+class GitPushConfig(BaseSettings):
+    """Git remote push credentials.
 
-    token: str = Field(..., validation_alias="GITHUB_TOKEN")
+    The token authenticates pushes to the git remote (Gitea now, GitHub
+    later). Kept out of config.yaml so the tracked config stays secret-free.
+    """
+
+    token: str = Field(..., validation_alias="GIT_PUSH_TOKEN")
 
     class Config:
         env_file = ".env"
@@ -51,22 +55,63 @@ class Config:
 
         # Load environment-based configs
         self.immich = ImmichConfig()
-        self.github_token = GitHubConfig().token
+        self.git_token = GitPushConfig().token
 
     @property
-    def github_repo(self) -> str:
-        """Get GitHub repository name."""
-        return self._yaml_config["github"]["repo"]
+    def _git(self) -> Dict:
+        """Get the git remote config block."""
+        return self._yaml_config.get("git", {})
 
     @property
-    def github_branch(self) -> str:
-        """Get GitHub branch name."""
-        return self._yaml_config["github"].get("branch", "main")
+    def git_remote_host(self) -> str:
+        """Host[:port] of the git remote, e.g. 'grnchnas:30008'."""
+        return self._git["remote_host"]
+
+    @property
+    def git_remote_path(self) -> str:
+        """Repo path on the remote, e.g. 'grinchdubs/grnch.xyz_photos.git'."""
+        return self._git["remote_path"]
+
+    @property
+    def git_branch(self) -> str:
+        """Branch to push photos to."""
+        return self._git.get("branch", "main")
+
+    @property
+    def git_work_dir(self) -> str:
+        """Local path for the working clone (persist on the /data volume)."""
+        return self._git.get("work_dir", "/data/repo")
+
+    @property
+    def git_author_name(self) -> str:
+        """Commit author name."""
+        return self._git.get("author_name", "immich-sync")
+
+    @property
+    def git_author_email(self) -> str:
+        """Commit author email."""
+        return self._git.get("author_email", "immich-sync@grnch.xyz")
+
+    @property
+    def git_username(self) -> str:
+        """Basic-auth username paired with GIT_PUSH_TOKEN."""
+        return self._git.get("username", "oauth2")
+
+    @property
+    def git_use_https(self) -> bool:
+        """Whether the git remote uses https:// (default http://)."""
+        return self._git.get("use_https", False)
+
+    @property
+    def git_remote_display(self) -> str:
+        """Credential-free remote string for logging/banners."""
+        scheme = "https" if self.git_use_https else "http"
+        return f"{scheme}://{self.git_remote_host}/{self.git_remote_path}"
 
     @property
     def commit_message_template(self) -> str:
         """Get commit message template."""
-        return self._yaml_config["github"].get(
+        return self._yaml_config.get("github", {}).get(
             "commit_message", "Add {count} photos from Immich tag '{tag}'"
         )
 

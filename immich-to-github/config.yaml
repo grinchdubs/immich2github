@@ -4,10 +4,22 @@
 immich:
   # API URL and key are read from the IMMICH_API_URL / IMMICH_API_KEY env vars.
 
-github:
-  # TODO: confirm this is the repo your grnch.xyz site pulls photos from.
-  repo: "grinchdubs/grnch.xyz_photos"
+# Where synced photos are pushed. The tool uses a plain `git push`, so this can
+# be the local Gitea staging repo now and GitHub later — only the host changes.
+# The push token is injected via the GIT_PUSH_TOKEN env var, never stored here.
+git:
+  remote_host: "grnchnas:30008"                 # Gitea on the NAS (host-local to the daemon)
+  remote_path: "grinchdubs/grnch.xyz_photos.git"
   branch: "main"
+  work_dir: "/data/repo"                         # working clone; keep on the mounted volume
+  author_name: "immich-sync"
+  author_email: "immich-sync@grnch.xyz"
+  username: "oauth2"                             # Basic-auth user paired with GIT_PUSH_TOKEN
+  use_https: false                               # set true if Gitea on :30008 serves TLS
+
+github:
+  # Legacy block — no longer the push target (the `git:` block above is).
+  # Kept only for the sync_tag commit-message template.
   commit_message: "Add {count} photo(s) from Immich album '{tag}'"
 
 sync:

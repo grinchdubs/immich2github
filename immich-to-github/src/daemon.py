@@ -104,8 +104,8 @@ class SyncDaemon:
         interval_minutes = self.config.automation_interval_minutes
         console.print(f"\n[bold]Starting Immich to GitHub sync daemon[/bold]")
         console.print(f"  • Sync interval: {interval_minutes} minutes")
-        console.print(f"  • Repository: {self.config.github_repo}")
-        console.print(f"  • Branch: {self.config.github_branch}")
+        console.print(f"  • Git remote: {self.config.git_remote_display}")
+        console.print(f"  • Branch: {self.config.git_branch}")
         albums = self.config.auto_sync_albums or list(self.config.album_mappings.keys())
         console.print(f"  • Albums: {', '.join(albums) or '(none)'}")
         console.print(f"  • Tags: {', '.join(self.config.tag_mappings.keys()) or '(none)'}")

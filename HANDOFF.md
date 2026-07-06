@@ -182,10 +182,34 @@ On TrueNAS these three are passed as **Custom App env vars**, never baked in.
 
 ## 5. The plan — phase by phase
 
-### Phase 1 — Convert the upload sink from GitHub-API to plain `git push` ★ENABLER★
+### Phase 1 — Convert the upload sink from GitHub-API to plain `git push` ★ENABLER★ ✅ DONE (2026-07-05)
 This is the linchpin. Once the tool pushes to a *git remote* instead of *github.com
 specifically*, "stage locally first" is just "use a different remote URL," and the same
 code serves both Gitea (now) and GitHub (later).
+
+> **STATUS: implemented, not yet run against a real Gitea.** What shipped:
+> - New `src/git_client.py` (`GitClient`) — subprocess git. Maintains a working clone at
+>   `git.work_dir` (`/data/repo`); every cycle it re-syncs to the remote branch (handles a
+>   brand-new EMPTY remote repo too). `upload_file()` copies + `git add` (stages only);
+>   `commit_and_push()` does ONE commit+push per sync cycle; `test_connection()` = `ls-remote`.
+> - Auth: token from **`GIT_PUSH_TOKEN`** env, injected as an HTTP `Authorization: Basic`
+>   header via `-c http.extraHeader`, **NOT** in the remote URL — so the token never appears
+>   in `git remote -v` or in git's error output. Basic user defaults to `oauth2` (Gitea
+>   accepts any username with a valid token as the password); override via `git.username`.
+> - `sync_engine.py`: `self.github_client` → `self.sink` (GitClient). After each album/tag
+>   loop it calls `commit_and_push`; **state is saved ONLY if the push succeeds** (failed
+>   push → those photos count as failed and retry next cycle; the next cycle's hard-reset
+>   discards the un-pushed local commit).
+> - `config.py`: dropped required `GITHUB_TOKEN`; added `GitPushConfig` (`GIT_PUSH_TOKEN`)
+>   and `git_*` properties. `config.yaml`: new `git:` block (secret-free); old `github:`
+>   block kept only for the sync_tag commit-message template.
+> - `Dockerfile`: installs `git` (apt-get). `requirements.txt`/`setup.py`: dropped PyGithub.
+>   `.env.example`: `GITHUB_TOKEN` → `GIT_PUSH_TOKEN`. Deleted dead `src/github_client.py`.
+> - Verified: modules byte-compile; the exact git command sequence (empty-repo first push,
+>   fetch/reset re-sync, no-op cycle) was validated against a throwaway local bare repo.
+> - **Not yet done:** run against the real Gitea repo (needs Phase 2 repo + token); confirm
+>   http-vs-https on `grnchnas:30008` (config default is `use_https: false`); rebuild the
+>   image (push to `main` triggers the GitHub Actions build → ghcr.io).
 
 **Recommended implementation:**
 1. Add `src/git_client.py` with a `GitClient` that mirrors the `GitHubClient` surface

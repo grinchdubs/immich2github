@@ -10,7 +10,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from .config import Config
 from .immich_client import ImmichClient, ImmichAsset
-from .github_client import GitHubClient
+from .git_client import GitClient
 from .state_manager import SyncState
 
 console = Console()
@@ -33,8 +33,16 @@ class SyncEngine:
         self.immich_client = ImmichClient(
             config.immich.api_url, config.immich.api_key
         )
-        self.github_client = GitHubClient(
-            config.github_token, config.github_repo, config.github_branch
+        self.sink = GitClient(
+            token=config.git_token,
+            remote_host=config.git_remote_host,
+            remote_path=config.git_remote_path,
+            branch=config.git_branch,
+            work_dir=config.git_work_dir,
+            author_name=config.git_author_name,
+            author_email=config.git_author_email,
+            username=config.git_username,
+            use_https=config.git_use_https,
         )
         self.state = SyncState(
             config.state_file_path, config.state_backup_enabled
@@ -49,19 +57,19 @@ class SyncEngine:
         console.print("[bold]Testing connections...[/bold]")
 
         immich_ok = await self.immich_client.test_connection()
-        github_ok = self.github_client.test_connection()
+        git_ok = self.sink.test_connection()
 
         if immich_ok:
             console.print("[green]✓ Immich connection successful[/green]")
         else:
             console.print("[red]✗ Immich connection failed[/red]")
 
-        if github_ok:
-            console.print(f"[green]✓ GitHub repository '{self.config.github_repo}' accessible[/green]")
+        if git_ok:
+            console.print(f"[green]✓ Git remote '{self.config.git_remote_display}' reachable[/green]")
         else:
-            console.print("[red]✗ GitHub connection failed[/red]")
+            console.print("[red]✗ Git remote connection failed[/red]")
 
-        return immich_ok and github_ok
+        return immich_ok and git_ok
 
     def _should_sync_asset(self, asset: ImmichAsset) -> bool:
         """Check if an asset should be synced.
@@ -215,7 +223,7 @@ class SyncEngine:
                             date=asset.file_created_at[:10] if asset.file_created_at else "unknown",
                         )
 
-                        url = self.github_client.upload_file(
+                        url = self.sink.upload_file(
                             local_file,
                             github_path,
                             commit_msg,
@@ -237,9 +245,17 @@ class SyncEngine:
 
                 progress.advance(task)
 
-        # Save state
+        # Commit + push everything staged this cycle, then persist state.
+        # Only save state if the push succeeded, so a failed push retries
+        # next cycle instead of silently marking assets as synced.
         if synced > 0:
-            self.state.save_state()
+            try:
+                self.sink.commit_and_push(f"Sync {synced} photo(s) from tag '{tag}'")
+                self.state.save_state()
+            except Exception as e:
+                console.print(f"[red]Push failed, not saving state (will retry): {e}[/red]")
+                failed += synced
+                synced = 0
 
         # Summary
         console.print(f"\n[bold green]Sync completed for tag '{tag}':[/bold green]")
@@ -399,7 +415,7 @@ class SyncEngine:
                         github_path = f"{folder}/{asset.original_filename}"
                         commit_msg = f"Add {asset.original_filename} from album {album_name}"
 
-                        url = self.github_client.upload_file(
+                        url = self.sink.upload_file(
                             local_file,
                             github_path,
                             commit_msg,
@@ -421,9 +437,19 @@ class SyncEngine:
 
                 progress.advance(task)
 
-        # Save state
+        # Commit + push everything staged this cycle, then persist state.
+        # Only save state if the push succeeded, so a failed push retries
+        # next cycle instead of silently marking assets as synced.
         if synced > 0:
-            self.state.save_state()
+            try:
+                self.sink.commit_and_push(
+                    f"Sync {synced} photo(s) from album '{album_name}'"
+                )
+                self.state.save_state()
+            except Exception as e:
+                console.print(f"[red]Push failed, not saving state (will retry): {e}[/red]")
+                failed += synced
+                synced = 0
 
         # Summary
         console.print(f"\n[bold green]Sync completed for album '{album_name}':[/bold green]")
