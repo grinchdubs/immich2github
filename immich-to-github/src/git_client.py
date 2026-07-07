@@ -180,11 +180,7 @@ class GitClient:
 
         if self._local_ref_exists(f"refs/heads/{self.branch}"):
             # Persistent clone / steady state — sole writer, no fetch needed.
-            self._git("checkout", "-q", self.branch)
-            if self._local_ref_exists(_MARKER_REF):
-                # Discard any commit/files left by a failed previous push so the
-                # retry starts from the last state we actually pushed.
-                self._git("reset", "-q", "--hard", _MARKER_REF)
+            self.begin_cycle()
             return
 
         # No local branch yet → bootstrap WITHOUT fetching. Start a fresh branch
@@ -197,6 +193,17 @@ class GitClient:
                   "Initialize photos repository")
         self._git("update-ref", _MARKER_REF, "HEAD")
         self._force_next_push = True
+
+    def begin_cycle(self) -> None:
+        """Reset the working clone to the last successfully-pushed state.
+
+        Call at the start of every sync cycle so a failed or crashed previous
+        cycle's leftover commit and staged files are discarded before staging
+        new ones (otherwise upload_file hits FileExistsError forever). No network.
+        """
+        self._git("checkout", "-q", self.branch)
+        if self._local_ref_exists(_MARKER_REF):
+            self._git("reset", "-q", "--hard", _MARKER_REF)
 
     # ------------------------------------------------------------------ #
     # Public surface (mirrors the old GitHubClient)
@@ -254,19 +261,46 @@ class GitClient:
             return False
 
         self._git("commit", "-q", "-m", commit_message)
-        # First push after a fresh bootstrap force-overwrites any unrelated
-        # remote history; subsequent pushes are normal fast-forwards.
-        push_args = ["push", "-q"]
-        if self._force_next_push:
-            push_args.append("--force")
-        # HEAD:branch also creates the branch on an empty remote.
-        push_args += ["origin", f"HEAD:{self.branch}"]
-        self._git(*push_args, auth=True, timeout=self.net_timeout)
+        self._push(force=self._force_next_push)
         self._force_next_push = False
         # Record this as the last known-good pushed state.
         self._git("update-ref", _MARKER_REF, "HEAD")
         console.print(f"[green]Pushed to[/green] {self.remote_url} ({self.branch})")
         return True
+
+    def _push(self, force: bool) -> None:
+        """Push HEAD to the remote branch, force-retrying on non-fast-forward.
+
+        We never fetch (upload-pack is unreliable here) so the local clone can
+        diverge from the remote — e.g. a stale /data left over from an earlier
+        run, or unrelated history the remote already held. Since the daemon is
+        the sole writer and the content is fully re-derivable from Immich, a
+        non-fast-forward rejection is resolved by force-overwriting the remote
+        rather than aborting forever.
+        """
+        push_args = ["push", "-q"]
+        if force:
+            push_args.append("--force")
+        # HEAD:branch also creates the branch on an empty remote.
+        push_args += ["origin", f"HEAD:{self.branch}"]
+        try:
+            self._git(*push_args, auth=True, timeout=self.net_timeout)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            already_forced = force
+            is_non_ff = (
+                "fetch first" in msg
+                or "non-fast-forward" in msg
+                or "rejected" in msg
+                or "behind" in msg
+            )
+            if already_forced or not is_non_ff:
+                raise
+            console.print(
+                "[yellow]Push rejected (remote diverged); force-overwriting "
+                "(sole writer, content re-derivable from Immich)[/yellow]"
+            )
+            self._push(force=True)
 
     def test_connection(self) -> bool:
         """Check the remote is reachable and the token authenticates."""

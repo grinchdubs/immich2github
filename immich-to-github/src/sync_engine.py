@@ -135,6 +135,9 @@ class SyncEngine:
         """
         console.print(f"\n[bold cyan]Syncing tag: {tag}[/bold cyan]")
 
+        # Reset the working clone to the last pushed state before staging.
+        self.sink.begin_cycle()
+
         # Check if tag is mapped
         if tag not in self.config.tag_mappings:
             console.print(f"[yellow]Warning: Tag '{tag}' not in tag_mappings. Using tag name as folder.[/yellow]")
@@ -291,6 +294,9 @@ class SyncEngine:
 
         console.print(f"\n[bold cyan]Syncing album: {album_name}[/bold cyan]")
         console.print(f"[dim]Target folder: {folder}[/dim]")
+
+        # Reset the working clone to the last pushed state before staging.
+        self.sink.begin_cycle()
 
         # Warning if album not in config
         if album_name not in self.config.album_mappings:
