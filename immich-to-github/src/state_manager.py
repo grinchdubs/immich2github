@@ -45,6 +45,14 @@ class SyncState:
         else:
             console.print("[dim]No existing sync state found, starting fresh[/dim]")
 
+    def reload(self) -> None:
+        """Discard in-memory changes and reload state from disk.
+
+        Used after a failed push: assets marked synced in memory this cycle were
+        never actually pushed, so we drop those marks and let them retry.
+        """
+        self._load_state()
+
     def _backup_state(self) -> None:
         """Create a backup of the state file."""
         if not self.backup_enabled or not self.state_file.exists():

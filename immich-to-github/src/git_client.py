@@ -9,17 +9,37 @@ Credentials are supplied at runtime via the ``GIT_PUSH_TOKEN`` env var (read in
 ``config.py``) and are injected as an HTTP ``Authorization`` header, never baked
 into the remote URL. This keeps the token out of ``git remote -v`` and, more
 importantly, out of git's error messages (which echo the remote URL on failure).
+
+Design notes:
+
+* **Push-only.** This tool is the *sole writer* of the target repo, so it never
+  needs to ``fetch`` in steady state — it keeps a persistent working clone and
+  just appends commits. Avoiding per-cycle fetches also sidesteps environments
+  where ``git-upload-pack`` (fetch) is unreliable but ``git-receive-pack``
+  (push) is fine (e.g. an MTU-limited tunnel). A one-time ``fetch`` is only used
+  to *bootstrap* a fresh clone against an already-populated remote.
+* **Failed-push safety.** After each successful push we move a local marker ref
+  (``refs/immich/last-pushed``) to HEAD. On the next cycle we hard-reset the
+  clone back to that marker, discarding any commit/files left behind by a failed
+  push so the retry starts clean. No network needed.
+* **No infinite hangs.** Every git invocation has a timeout; a stuck network op
+  raises instead of freezing the daemon forever, so the cycle fails and retries.
 """
 
 import base64
+import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from rich.console import Console
 
 console = Console()
+
+# Local ref tracking the last commit we successfully pushed. Used to reset the
+# working clone to a known-good state on the cycle after a failed push.
+_MARKER_REF = "refs/immich/last-pushed"
 
 
 class GitClient:
@@ -36,13 +56,15 @@ class GitClient:
         author_email: str = "immich-sync@grnch.xyz",
         username: str = "oauth2",
         use_https: bool = False,
+        net_timeout: int = 120,
+        local_timeout: int = 60,
     ):
         """Initialize the git client.
 
         Args:
             token: Access token for the remote (from GIT_PUSH_TOKEN env var).
             remote_host: Host[:port] of the git remote, e.g. "grnchnas:30008".
-            remote_path: Repo path on the remote, e.g. "grinchdubs/grnch.xyz_photos.git".
+            remote_path: Repo path on the remote, e.g. "grnch/grnch.xyz_photos.git".
             branch: Branch to push to.
             work_dir: Local path for the working clone (persist on a volume).
             author_name: Git commit author name.
@@ -51,6 +73,9 @@ class GitClient:
                 valid token as the password regardless of username, so the
                 default "oauth2" works; override via config if needed.
             use_https: Use https:// instead of http:// for the remote.
+            net_timeout: Seconds before a network git op (fetch/push/ls-remote)
+                is aborted, so a stuck connection never wedges the daemon.
+            local_timeout: Seconds before a local git op is aborted.
         """
         scheme = "https" if use_https else "http"
         # Clean URL — no credentials embedded, so git never logs the token.
@@ -59,6 +84,8 @@ class GitClient:
         self.work_dir = Path(work_dir)
         self.author_name = author_name
         self.author_email = author_email
+        self.net_timeout = net_timeout
+        self.local_timeout = local_timeout
 
         # Precompute the Authorization header value (Basic base64("user:token")).
         raw = f"{username}:{token}".encode("utf-8")
@@ -69,40 +96,67 @@ class GitClient:
     # ------------------------------------------------------------------ #
     # Low-level git runners
     # ------------------------------------------------------------------ #
-    def _git(self, *args: str, auth: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+    def _git(
+        self,
+        *args: str,
+        auth: bool = False,
+        check: bool = True,
+        timeout: Optional[int] = None,
+    ) -> subprocess.CompletedProcess:
         """Run a git command in the working clone.
 
         Args:
             *args: git arguments (without the leading "git").
             auth: If True, inject the Authorization header (for network ops).
             check: Raise on non-zero exit.
+            timeout: Seconds before aborting. Defaults to local_timeout; pass
+                net_timeout for network ops.
         """
+        if timeout is None:
+            timeout = self.local_timeout
         cmd: List[str] = ["git", "-C", str(self.work_dir)]
         if auth:
             # -c http.extraHeader keeps the token out of the URL and out of
             # any error output git prints.
             cmd += ["-c", f"http.extraHeader={self._auth_header}"]
         cmd += list(args)
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # GIT_TERMINAL_PROMPT=0 ensures git fails fast instead of blocking on an
+        # interactive credential prompt if auth is ever rejected.
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        # Redacted form for any error message (never expose the token).
+        safe_cmd = [
+            "http.extraHeader=<redacted>" if a.startswith("http.extraHeader=") else a
+            for a in cmd
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, env=env
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"git timed out after {timeout}s: {' '.join(safe_cmd)}"
+            )
         if check and result.returncode != 0:
             # Surface git's stderr so daemon logs are debuggable. Safe to log:
-            # the token lives in the extraHeader (redacted below), never in the
+            # the token lives in the extraHeader (redacted above), never in the
             # URL, so git's stderr can only contain the credential-free remote.
-            safe_cmd = [
-                "http.extraHeader=<redacted>" if a.startswith("http.extraHeader=") else a
-                for a in cmd
-            ]
             raise RuntimeError(
                 f"git failed (rc={result.returncode}): {' '.join(safe_cmd)}\n"
                 f"{result.stderr.strip()}"
             )
         return result
 
+    def _local_ref_exists(self, ref: str) -> bool:
+        """Return True if a ref (branch/marker) exists in the local clone."""
+        return self._git(
+            "rev-parse", "--verify", "--quiet", ref, check=False
+        ).returncode == 0
+
     def _remote_branch_exists(self) -> bool:
-        """Return True if ``branch`` exists on the remote."""
+        """Return True if ``branch`` exists on the remote (small GET, no pack)."""
         result = self._git(
             "ls-remote", "--heads", self.remote_url, self.branch,
-            auth=True, check=False,
+            auth=True, check=False, timeout=self.net_timeout,
         )
         return result.returncode == 0 and bool(result.stdout.strip())
 
@@ -110,28 +164,46 @@ class GitClient:
     # Setup
     # ------------------------------------------------------------------ #
     def _ensure_repo(self) -> None:
-        """Ensure the working clone exists and matches the remote branch.
+        """Ensure the working clone exists and is at a clean, known-good state.
 
-        Handles a freshly-created (empty) remote repo with no commits yet.
-        Runs every sync cycle, so it also resyncs the clone to the remote
-        (discarding any local state left over from a failed push).
+        Runs every sync cycle. In steady state (a persistent clone already
+        exists) this does NO network I/O — it just resets the clone to the last
+        successfully-pushed commit, discarding anything a failed push left
+        behind. A network ``fetch`` is used only to bootstrap a brand-new clone
+        against an already-populated remote.
         """
         if not (self.work_dir / ".git").is_dir():
             self.work_dir.mkdir(parents=True, exist_ok=True)
-            self._git("init", "-q", check=True)
-            self._git("remote", "add", "origin", self.remote_url, check=True)
+            self._git("init", "-q")
+            self._git("remote", "add", "origin", self.remote_url)
 
         self._git("config", "user.name", self.author_name)
         self._git("config", "user.email", self.author_email)
 
+        if self._local_ref_exists(f"refs/heads/{self.branch}"):
+            # Persistent clone / steady state — sole writer, no fetch needed.
+            self._git("checkout", "-q", self.branch)
+            if self._local_ref_exists(_MARKER_REF):
+                # Discard any commit/files left by a failed previous push so the
+                # retry starts from the last state we actually pushed.
+                self._git("reset", "-q", "--hard", _MARKER_REF)
+            return
+
+        # No local branch yet → bootstrap.
         if self._remote_branch_exists():
-            # Fetch and hard-reset onto the remote branch.
-            self._git("fetch", "-q", "origin", self.branch, auth=True)
+            # Remote already has content: seed the clone once (needs upload-pack).
+            self._git("fetch", "-q", "origin", self.branch, auth=True,
+                      timeout=self.net_timeout)
             self._git("checkout", "-q", "-B", self.branch, "FETCH_HEAD")
             self._git("reset", "-q", "--hard", "FETCH_HEAD")
+            self._git("update-ref", _MARKER_REF, "HEAD")
         else:
-            # Empty/new remote — start a fresh branch we'll push later.
+            # Empty remote: start a fresh branch with an empty baseline commit so
+            # there is always a marker to reset to on a failed-push retry.
             self._git("checkout", "-q", "-B", self.branch)
+            self._git("commit", "-q", "--allow-empty", "-m",
+                      "Initialize photos repository")
+            self._git("update-ref", _MARKER_REF, "HEAD")
 
     # ------------------------------------------------------------------ #
     # Public surface (mirrors the old GitHubClient)
@@ -174,12 +246,15 @@ class GitClient:
     def commit_and_push(self, commit_message: str) -> bool:
         """Commit staged changes (if any) and push to the remote.
 
+        On a successful push the ``last-pushed`` marker is advanced to HEAD so a
+        later failed cycle can be rolled back to this point.
+
         Returns:
             True if a push happened, False if there was nothing to commit.
 
         Raises:
-            subprocess.CalledProcessError: If the push fails (caller should
-            NOT persist sync state in that case, so it retries next cycle).
+            RuntimeError: If the push fails or times out (caller should NOT
+            persist sync state in that case, so it retries next cycle).
         """
         # Nothing staged → nothing to do.
         if self._git("diff", "--cached", "--quiet", check=False).returncode == 0:
@@ -187,7 +262,10 @@ class GitClient:
 
         self._git("commit", "-q", "-m", commit_message)
         # HEAD:branch also creates the branch on an empty remote.
-        self._git("push", "-q", "origin", f"HEAD:{self.branch}", auth=True)
+        self._git("push", "-q", "origin", f"HEAD:{self.branch}", auth=True,
+                  timeout=self.net_timeout)
+        # Record this as the last known-good pushed state.
+        self._git("update-ref", _MARKER_REF, "HEAD")
         console.print(f"[green]Pushed to[/green] {self.remote_url} ({self.branch})")
         return True
 
@@ -196,6 +274,7 @@ class GitClient:
         try:
             result = self._git(
                 "ls-remote", self.remote_url, auth=True, check=False,
+                timeout=self.net_timeout,
             )
             if result.returncode == 0:
                 return True

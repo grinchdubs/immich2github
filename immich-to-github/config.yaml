@@ -9,7 +9,7 @@ immich:
 # The push token is injected via the GIT_PUSH_TOKEN env var, never stored here.
 git:
   remote_host: "grnchnas:30008"                 # Gitea on the NAS (host-local to the daemon)
-  remote_path: "grinchdubs/grnch.xyz_photos.git"
+  remote_path: "grnch/grnch.xyz_photos.git"
   branch: "main"
   work_dir: "/data/repo"                         # working clone; keep on the mounted volume
   author_name: "immich-sync"

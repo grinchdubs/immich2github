@@ -254,6 +254,9 @@ class SyncEngine:
                 self.state.save_state()
             except Exception as e:
                 console.print(f"[red]Push failed, not saving state (will retry): {e}[/red]")
+                # Drop in-memory marks for assets we never actually pushed so
+                # they are retried next cycle instead of skipped as "synced".
+                self.state.reload()
                 failed += synced
                 synced = 0
 
@@ -448,6 +451,9 @@ class SyncEngine:
                 self.state.save_state()
             except Exception as e:
                 console.print(f"[red]Push failed, not saving state (will retry): {e}[/red]")
+                # Drop in-memory marks for assets we never actually pushed so
+                # they are retried next cycle instead of skipped as "synced".
+                self.state.reload()
                 failed += synced
                 synced = 0
 

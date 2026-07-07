@@ -129,6 +129,12 @@ class ImmichClient:
     async def get_album_assets(self, album_id: str) -> List[ImmichAsset]:
         """Fetch all assets from a specific album.
 
+        Uses the paginated search API (``POST /api/search/metadata`` with an
+        ``albumIds`` filter) rather than ``GET /api/albums/{id}``. Newer Immich
+        versions (3.0+) no longer embed the ``assets`` array in the album detail
+        response, so that endpoint returns an empty list even when the album has
+        photos. The search API returns them (and works with scoped API keys).
+
         Args:
             album_id: ID of the album
 
@@ -136,20 +142,33 @@ class ImmichClient:
             List of ImmichAsset objects in the album
         """
         try:
-            response = await self.client.get(f"{self.api_url}/api/albums/{album_id}")
-            response.raise_for_status()
-            album_data = response.json()
-            assets_data = album_data.get("assets", [])
-            console.print(f"[dim]Fetched {len(assets_data)} assets from album[/dim]")
-            
-            parsed_assets = []
-            for asset in assets_data:
-                try:
-                    parsed_assets.append(ImmichAsset(asset))
-                except Exception as e:
-                    console.print(f"[yellow]Warning: Failed to parse album asset: {e}[/yellow]")
-                    continue
-            
+            parsed_assets: List[ImmichAsset] = []
+            page = 1
+            while True:
+                response = await self.client.post(
+                    f"{self.api_url}/api/search/metadata",
+                    json={"albumIds": [album_id], "page": page, "size": 250},
+                )
+                response.raise_for_status()
+                wrapper = response.json().get("assets", {})
+                items = wrapper.get("items", [])
+
+                for asset in items:
+                    try:
+                        parsed_assets.append(ImmichAsset(asset))
+                    except Exception as e:
+                        console.print(
+                            f"[yellow]Warning: Failed to parse album asset: {e}[/yellow]"
+                        )
+                        continue
+
+                # Immich returns nextPage as the next page number (str) or null.
+                next_page = wrapper.get("nextPage")
+                if not next_page or not items:
+                    break
+                page = int(next_page)
+
+            console.print(f"[dim]Fetched {len(parsed_assets)} assets from album[/dim]")
             return parsed_assets
         except httpx.HTTPStatusError as e:
             console.print(f"[red]HTTP error fetching album assets: {e}[/red]")
