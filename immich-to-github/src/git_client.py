@@ -91,6 +91,10 @@ class GitClient:
         raw = f"{username}:{token}".encode("utf-8")
         self._auth_header = "Authorization: Basic " + base64.b64encode(raw).decode("ascii")
 
+        # Set True on a fresh bootstrap so the first push force-overwrites any
+        # unrelated remote history (see _ensure_repo). Cleared after first push.
+        self._force_next_push = False
+
         self._ensure_repo()
 
     # ------------------------------------------------------------------ #
@@ -152,25 +156,19 @@ class GitClient:
             "rev-parse", "--verify", "--quiet", ref, check=False
         ).returncode == 0
 
-    def _remote_branch_exists(self) -> bool:
-        """Return True if ``branch`` exists on the remote (small GET, no pack)."""
-        result = self._git(
-            "ls-remote", "--heads", self.remote_url, self.branch,
-            auth=True, check=False, timeout=self.net_timeout,
-        )
-        return result.returncode == 0 and bool(result.stdout.strip())
-
     # ------------------------------------------------------------------ #
     # Setup
     # ------------------------------------------------------------------ #
     def _ensure_repo(self) -> None:
         """Ensure the working clone exists and is at a clean, known-good state.
 
-        Runs every sync cycle. In steady state (a persistent clone already
-        exists) this does NO network I/O — it just resets the clone to the last
-        successfully-pushed commit, discarding anything a failed push left
-        behind. A network ``fetch`` is used only to bootstrap a brand-new clone
-        against an already-populated remote.
+        Runs every sync cycle and does NO network I/O — never fetches. In steady
+        state it resets the persistent clone to the last successfully-pushed
+        commit (discarding anything a failed push left behind). On a brand-new
+        clone it starts a fresh branch and arms a one-time force-push, because
+        ``git-upload-pack`` (fetch/clone) is unreliable on this remote while
+        ``git-receive-pack`` (push) works, and the repo content is fully
+        re-derivable from Immich anyway.
         """
         if not (self.work_dir / ".git").is_dir():
             self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -189,21 +187,16 @@ class GitClient:
                 self._git("reset", "-q", "--hard", _MARKER_REF)
             return
 
-        # No local branch yet → bootstrap.
-        if self._remote_branch_exists():
-            # Remote already has content: seed the clone once (needs upload-pack).
-            self._git("fetch", "-q", "origin", self.branch, auth=True,
-                      timeout=self.net_timeout)
-            self._git("checkout", "-q", "-B", self.branch, "FETCH_HEAD")
-            self._git("reset", "-q", "--hard", "FETCH_HEAD")
-            self._git("update-ref", _MARKER_REF, "HEAD")
-        else:
-            # Empty remote: start a fresh branch with an empty baseline commit so
-            # there is always a marker to reset to on a failed-push retry.
-            self._git("checkout", "-q", "-B", self.branch)
-            self._git("commit", "-q", "--allow-empty", "-m",
-                      "Initialize photos repository")
-            self._git("update-ref", _MARKER_REF, "HEAD")
+        # No local branch yet → bootstrap WITHOUT fetching. Start a fresh branch
+        # with an empty baseline commit (so there is always a marker to reset to
+        # on a failed-push retry). The first push force-overwrites whatever
+        # unrelated history the remote may hold; from then on pushes are normal
+        # fast-forwards on top of our own history.
+        self._git("checkout", "-q", "-B", self.branch)
+        self._git("commit", "-q", "--allow-empty", "-m",
+                  "Initialize photos repository")
+        self._git("update-ref", _MARKER_REF, "HEAD")
+        self._force_next_push = True
 
     # ------------------------------------------------------------------ #
     # Public surface (mirrors the old GitHubClient)
@@ -261,9 +254,15 @@ class GitClient:
             return False
 
         self._git("commit", "-q", "-m", commit_message)
+        # First push after a fresh bootstrap force-overwrites any unrelated
+        # remote history; subsequent pushes are normal fast-forwards.
+        push_args = ["push", "-q"]
+        if self._force_next_push:
+            push_args.append("--force")
         # HEAD:branch also creates the branch on an empty remote.
-        self._git("push", "-q", "origin", f"HEAD:{self.branch}", auth=True,
-                  timeout=self.net_timeout)
+        push_args += ["origin", f"HEAD:{self.branch}"]
+        self._git(*push_args, auth=True, timeout=self.net_timeout)
+        self._force_next_push = False
         # Record this as the last known-good pushed state.
         self._git("update-ref", _MARKER_REF, "HEAD")
         console.print(f"[green]Pushed to[/green] {self.remote_url} ({self.branch})")
