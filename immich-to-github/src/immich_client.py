@@ -1,7 +1,7 @@
 """Immich API client for fetching photos and assets."""
 
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from pathlib import Path
 import httpx
 from rich.console import Console
@@ -176,6 +176,73 @@ class ImmichClient:
         except Exception as e:
             console.print(f"[red]Error fetching album assets: {e}[/red]")
             raise
+
+    async def get_tags(self) -> List[Dict[str, Any]]:
+        """Fetch all tags defined in Immich.
+
+        Returns an empty list (and warns) if the API key lacks ``tag.read`` or
+        the request fails — tag-based exclusion is then treated as disabled
+        rather than aborting the sync.
+        """
+        try:
+            response = await self.client.get(f"{self.api_url}/api/tags")
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            console.print(
+                f"[yellow]Could not read tags ({e}); tag exclusion disabled[/yellow]"
+            )
+            return []
+
+    async def get_album_excluded_asset_ids(
+        self, album_id: str, exclude_tags: List[str]
+    ) -> Set[str]:
+        """Return IDs of assets in ``album_id`` carrying any of ``exclude_tags``.
+
+        Tags are matched by name/value, case-insensitively. Uses the search API
+        with a ``tagIds`` filter (one query per matching tag, unioned) because
+        ``search/metadata`` results don't carry per-asset tags. Returns an empty
+        set if there are no excluded tags, no matching tags exist, or tags can't
+        be read.
+        """
+        if not exclude_tags:
+            return set()
+        tags = await self.get_tags()
+        if not tags:
+            return set()
+
+        wanted = {t.lower() for t in exclude_tags}
+        tag_ids = [
+            t["id"]
+            for t in tags
+            if str(t.get("name", "")).lower() in wanted
+            or str(t.get("value", "")).lower() in wanted
+        ]
+
+        excluded: Set[str] = set()
+        for tag_id in tag_ids:
+            page = 1
+            while True:
+                response = await self.client.post(
+                    f"{self.api_url}/api/search/metadata",
+                    json={
+                        "albumIds": [album_id],
+                        "tagIds": [tag_id],
+                        "page": page,
+                        "size": 250,
+                    },
+                )
+                response.raise_for_status()
+                wrapper = response.json().get("assets", {})
+                items = wrapper.get("items", [])
+                for asset in items:
+                    excluded.add(asset["id"])
+                next_page = wrapper.get("nextPage")
+                if not next_page or not items:
+                    break
+                page = int(next_page)
+        return excluded
 
     async def download_asset(
         self, asset_id: str, output_path: Path, filename: Optional[str] = None

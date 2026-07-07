@@ -316,6 +316,16 @@ class SyncEngine:
         assets = await self.immich_client.get_album_assets(album["id"])
         console.print(f"Found {len(assets)} assets in album '{album_name}'")
 
+        # Album assets from the search API don't carry per-asset tags, so look
+        # up which ones have an excluded tag and skip them below.
+        excluded_ids = await self.immich_client.get_album_excluded_asset_ids(
+            album["id"], self.config.exclude_tags
+        )
+        if excluded_ids:
+            console.print(
+                f"[dim]{len(excluded_ids)} asset(s) match exclude_tags and will be skipped[/dim]"
+            )
+
         if not assets:
             console.print("[yellow]No assets to sync![/yellow]")
             return {
@@ -336,16 +346,19 @@ class SyncEngine:
                 skipped += 1
                 continue
             
-            # Check excluded tags
-            if any(tag in self.config.exclude_tags for tag in asset.tags):
+            # Check excluded tags (via the looked-up id set, plus any inline
+            # tags for safety).
+            if asset.id in excluded_ids or any(
+                tag in self.config.exclude_tags for tag in asset.tags
+            ):
                 skipped += 1
                 continue
-            
+
             # Check if already synced (unless force=True)
             if not force and self.state.is_synced(asset.id):
                 skipped += 1
                 continue
-            
+
             assets_to_sync.append(asset)
 
         if skipped > 0 and not self.dry_run:
