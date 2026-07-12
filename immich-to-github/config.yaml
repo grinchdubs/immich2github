@@ -57,11 +57,9 @@ automation:
   retry_on_failure: true
   max_retries: 3
 
-state:
-  # MUST live on the mounted /data volume so sync state survives restarts.
-  # (config.py reads this YAML value; the STATE_FILE_PATH env var is ignored.)
-  file_path: "/data/.sync_state.json"
-  backup: true
+# No `state:` block: the reconcile model keeps no incremental sync state. The
+# working clone under work_dir (/data/repo) plus each folder's index.json are
+# the only state, and both are re-derivable from the Immich album.
 
 logging:
   level: "INFO"
