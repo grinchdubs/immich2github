@@ -1,34 +1,35 @@
-"""Git-based upload sink.
+"""Git-based upload sink for the reconcile engine.
 
-Replaces the GitHub Contents-API client (``github_client.py``) with a plain
-``git push`` to any remote. Because it targets a *git remote* rather than
-github.com specifically, the same code stages photos to the local Gitea server
-now and to GitHub later — only the remote URL changes.
-
-Credentials are supplied at runtime via the ``GIT_PUSH_TOKEN`` env var (read in
-``config.py``) and are injected as an HTTP ``Authorization`` header, never baked
-into the remote URL. This keeps the token out of ``git remote -v`` and, more
-importantly, out of git's error messages (which echo the remote URL on failure).
+The sync engine treats the Immich album as the source of truth and reconciles
+the photos repo to match it every run (add / delete / rename). This client is
+the thin git layer under that: it exposes the working clone as a plain
+directory the engine manipulates (download, rename, delete, write manifest),
+then stages and pushes whatever changed.
 
 Design notes:
 
 * **Push-only.** This tool is the *sole writer* of the target repo, so it never
-  needs to ``fetch`` in steady state — it keeps a persistent working clone and
-  just appends commits. Avoiding per-cycle fetches also sidesteps environments
-  where ``git-upload-pack`` (fetch) is unreliable but ``git-receive-pack``
-  (push) is fine (e.g. an MTU-limited tunnel). A one-time ``fetch`` is only used
-  to *bootstrap* a fresh clone against an already-populated remote.
-* **Failed-push safety.** After each successful push we move a local marker ref
-  (``refs/immich/last-pushed``) to HEAD. On the next cycle we hard-reset the
-  clone back to that marker, discarding any commit/files left behind by a failed
-  push so the retry starts clean. No network needed.
-* **No infinite hangs.** Every git invocation has a timeout; a stuck network op
-  raises instead of freezing the daemon forever, so the cycle fails and retries.
+  needs to ``fetch`` — it keeps a persistent working clone and appends commits.
+  Avoiding fetch also sidesteps environments where ``git-upload-pack`` (fetch)
+  is unreliable but ``git-receive-pack`` (push) is fine (e.g. an MTU-limited
+  tunnel). A fresh clone bootstraps by starting an empty branch and
+  force-pushing once, since the content is fully re-derivable from Immich.
+* **No incremental state.** Correctness comes from reconcile, not from a
+  side-car state file. The working tree is the actual state; the album is the
+  desired state; the diff between them is the commit.
+* **Unpushed-commit safety.** After each successful push we move a marker ref
+  (``refs/immich/last-pushed``) to HEAD. If a push fails, the commit stays and
+  the next cycle notices HEAD has moved past the marker and re-pushes it — no
+  network state to reconcile, no rollback needed.
+* **No infinite hangs.** Every git invocation has a timeout.
+
+Credentials come from ``GIT_PUSH_TOKEN`` (read in ``config.py``) and are
+injected as an HTTP ``Authorization`` header, never baked into the remote URL,
+so the token stays out of ``git remote -v`` and out of git's error output.
 """
 
 import base64
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional
@@ -37,13 +38,13 @@ from rich.console import Console
 
 console = Console()
 
-# Local ref tracking the last commit we successfully pushed. Used to reset the
-# working clone to a known-good state on the cycle after a failed push.
+# Local ref tracking the last commit we successfully pushed. Used to detect a
+# commit left unpushed by a failed push so the next cycle re-pushes it.
 _MARKER_REF = "refs/immich/last-pushed"
 
 
 class GitClient:
-    """Uploads files to a git remote via a local working clone."""
+    """Exposes a git working clone as a reconcilable directory + push."""
 
     def __init__(
         self,
@@ -73,8 +74,8 @@ class GitClient:
                 valid token as the password regardless of username, so the
                 default "oauth2" works; override via config if needed.
             use_https: Use https:// instead of http:// for the remote.
-            net_timeout: Seconds before a network git op (fetch/push/ls-remote)
-                is aborted, so a stuck connection never wedges the daemon.
+            net_timeout: Seconds before a network git op (push/ls-remote) is
+                aborted, so a stuck connection never wedges the daemon.
             local_timeout: Seconds before a local git op is aborted.
         """
         scheme = "https" if use_https else "http"
@@ -141,9 +142,8 @@ class GitClient:
                 f"git timed out after {timeout}s: {' '.join(safe_cmd)}"
             )
         if check and result.returncode != 0:
-            # Surface git's stderr so daemon logs are debuggable. Safe to log:
-            # the token lives in the extraHeader (redacted above), never in the
-            # URL, so git's stderr can only contain the credential-free remote.
+            # Safe to log: the token lives in the extraHeader (redacted above),
+            # never in the URL, so git's stderr only holds the clean remote.
             raise RuntimeError(
                 f"git failed (rc={result.returncode}): {' '.join(safe_cmd)}\n"
                 f"{result.stderr.strip()}"
@@ -156,19 +156,22 @@ class GitClient:
             "rev-parse", "--verify", "--quiet", ref, check=False
         ).returncode == 0
 
+    def _rev(self, ref: str) -> str:
+        """Return the commit SHA a ref points at."""
+        return self._git("rev-parse", ref).stdout.strip()
+
     # ------------------------------------------------------------------ #
     # Setup
     # ------------------------------------------------------------------ #
     def _ensure_repo(self) -> None:
-        """Ensure the working clone exists and is at a clean, known-good state.
+        """Ensure the working clone exists and the target branch is checked out.
 
-        Runs every sync cycle and does NO network I/O — never fetches. In steady
-        state it resets the persistent clone to the last successfully-pushed
-        commit (discarding anything a failed push left behind). On a brand-new
-        clone it starts a fresh branch and arms a one-time force-push, because
-        ``git-upload-pack`` (fetch/clone) is unreliable on this remote while
-        ``git-receive-pack`` (push) works, and the repo content is fully
-        re-derivable from Immich anyway.
+        Does NO network I/O — never fetches. On an existing clone it just checks
+        out the branch (the reconcile pass recomputes the full desired tree, so
+        any leftover from a crashed cycle is corrected by the next commit). On a
+        brand-new clone it starts a fresh branch with an empty baseline commit
+        and arms a one-time force-push, because ``git-upload-pack`` (clone) is
+        unreliable on this remote and the content is re-derivable from Immich.
         """
         if not (self.work_dir / ".git").is_dir():
             self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -180,90 +183,75 @@ class GitClient:
 
         if self._local_ref_exists(f"refs/heads/{self.branch}"):
             # Persistent clone / steady state — sole writer, no fetch needed.
-            self.begin_cycle()
+            self._git("checkout", "-q", self.branch)
             return
 
         # No local branch yet → bootstrap WITHOUT fetching. Start a fresh branch
-        # with an empty baseline commit (so there is always a marker to reset to
-        # on a failed-push retry). The first push force-overwrites whatever
-        # unrelated history the remote may hold; from then on pushes are normal
-        # fast-forwards on top of our own history.
+        # with an empty baseline commit (so there is always a marker to build
+        # on). The first push force-overwrites whatever unrelated history the
+        # remote may hold; from then on pushes are normal fast-forwards.
         self._git("checkout", "-q", "-B", self.branch)
         self._git("commit", "-q", "--allow-empty", "-m",
                   "Initialize photos repository")
         self._git("update-ref", _MARKER_REF, "HEAD")
         self._force_next_push = True
 
-    def begin_cycle(self) -> None:
-        """Reset the working clone to the last successfully-pushed state.
+    # ------------------------------------------------------------------ #
+    # Reconcile primitives (the engine manipulates the working tree directly)
+    # ------------------------------------------------------------------ #
+    def work_path(self, rel_path: str) -> Path:
+        """Absolute path inside the working clone for a repo-relative path."""
+        return self.work_dir / rel_path
 
-        Call at the start of every sync cycle so a failed or crashed previous
-        cycle's leftover commit and staged files are discarded before staging
-        new ones (otherwise upload_file hits FileExistsError forever). No network.
+    def list_files(self, folder: str) -> List[str]:
+        """Return the names of files directly under ``folder`` (no subdirs).
+
+        Empty list if the folder does not exist yet.
         """
-        self._git("checkout", "-q", self.branch)
-        if self._local_ref_exists(_MARKER_REF):
-            self._git("reset", "-q", "--hard", _MARKER_REF)
+        p = self.work_dir / folder
+        if not p.is_dir():
+            return []
+        return [f.name for f in p.iterdir() if f.is_file()]
+
+    def read_text(self, rel_path: str) -> Optional[str]:
+        """Return the text contents of a repo file, or None if it is absent."""
+        p = self.work_dir / rel_path
+        if not p.is_file():
+            return None
+        return p.read_text(encoding="utf-8")
+
+    def stage(self, folder: str) -> None:
+        """Stage every change (adds, deletes, renames) under ``folder``."""
+        self._git("add", "-A", "--", folder)
 
     # ------------------------------------------------------------------ #
-    # Public surface (mirrors the old GitHubClient)
+    # Commit + push
     # ------------------------------------------------------------------ #
-    def upload_file(
-        self,
-        file_path: Path,
-        github_path: str,
-        commit_message: str,
-        overwrite: bool = False,
-    ) -> str:
-        """Stage a file into the working clone (no commit/push yet).
-
-        Committing and pushing is deferred to ``commit_and_push`` so a whole
-        sync cycle becomes a single push instead of one per photo. The
-        ``commit_message`` arg is accepted for interface compatibility but is
-        not used per-file.
-
-        Args:
-            file_path: Local path to the downloaded file.
-            github_path: Destination path within the repo (kept name for
-                interface compatibility with the old sink).
-            commit_message: Unused per-file (see above).
-            overwrite: Allow replacing an existing file at that path.
-
-        Returns:
-            A raw URL to the file on the remote.
-        """
-        dest = self.work_dir / github_path
-        if dest.exists() and not overwrite:
-            raise FileExistsError(
-                f"File {github_path} already exists. Use force to overwrite."
-            )
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file_path, dest)
-        self._git("add", "--", github_path)
-        console.print(f"[green]Staged:[/green] {github_path}")
-        return self.get_raw_url(github_path)
-
     def commit_and_push(self, commit_message: str) -> bool:
-        """Commit staged changes (if any) and push to the remote.
+        """Commit staged changes (if any) and push if there is anything unpushed.
 
-        On a successful push the ``last-pushed`` marker is advanced to HEAD so a
-        later failed cycle can be rolled back to this point.
+        Pushes when either new changes were just committed OR a previous cycle
+        left a commit unpushed (HEAD is ahead of the last-pushed marker). On a
+        successful push the marker advances to HEAD.
 
         Returns:
-            True if a push happened, False if there was nothing to commit.
+            True if a push happened, False if the remote was already up to date.
 
         Raises:
-            RuntimeError: If the push fails or times out (caller should NOT
-            persist sync state in that case, so it retries next cycle).
+            RuntimeError: If the push fails or times out. The commit stays local
+            and the next cycle retries the push; no state needs unwinding.
         """
-        # Nothing staged → nothing to do.
-        if self._git("diff", "--cached", "--quiet", check=False).returncode == 0:
-            return False
+        staged = self._git("diff", "--cached", "--quiet", check=False).returncode != 0
+        if staged:
+            self._git("commit", "-q", "-m", commit_message)
 
-        self._git("commit", "-q", "-m", commit_message)
+        head = self._rev("HEAD")
+        marker = self._rev(_MARKER_REF) if self._local_ref_exists(_MARKER_REF) else None
+        if not staged and marker == head:
+            return False  # nothing new and nothing left unpushed
+
         self._push(force=self._force_next_push)
         self._force_next_push = False
-        # Record this as the last known-good pushed state.
         self._git("update-ref", _MARKER_REF, "HEAD")
         console.print(f"[green]Pushed to[/green] {self.remote_url} ({self.branch})")
         return True
@@ -272,11 +260,11 @@ class GitClient:
         """Push HEAD to the remote branch, force-retrying on non-fast-forward.
 
         We never fetch (upload-pack is unreliable here) so the local clone can
-        diverge from the remote — e.g. a stale /data left over from an earlier
-        run, or unrelated history the remote already held. Since the daemon is
-        the sole writer and the content is fully re-derivable from Immich, a
-        non-fast-forward rejection is resolved by force-overwriting the remote
-        rather than aborting forever.
+        diverge from the remote — e.g. a stale /data from an earlier run, or
+        unrelated history the remote already held. Since the daemon is the sole
+        writer and the content is fully re-derivable from Immich, a
+        non-fast-forward rejection is resolved by force-overwriting rather than
+        aborting forever.
         """
         push_args = ["push", "-q"]
         if force:
@@ -287,14 +275,13 @@ class GitClient:
             self._git(*push_args, auth=True, timeout=self.net_timeout)
         except RuntimeError as e:
             msg = str(e).lower()
-            already_forced = force
             is_non_ff = (
                 "fetch first" in msg
                 or "non-fast-forward" in msg
                 or "rejected" in msg
                 or "behind" in msg
             )
-            if already_forced or not is_non_ff:
+            if force or not is_non_ff:
                 raise
             console.print(
                 "[yellow]Push rejected (remote diverged); force-overwriting "
@@ -320,6 +307,6 @@ class GitClient:
             return False
 
     def get_raw_url(self, github_path: str) -> str:
-        """Return a raw file URL on the remote (best-effort, for state records)."""
+        """Return a raw file URL on the remote (best-effort)."""
         base = self.remote_url[:-4] if self.remote_url.endswith(".git") else self.remote_url
         return f"{base}/raw/branch/{self.branch}/{github_path}"

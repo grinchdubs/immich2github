@@ -56,8 +56,10 @@ class SyncDaemon:
                     try:
                         result = await self.engine.sync_album(album_name, force=False)
                         console.print(
-                            f"[green]Album '{album_name}': {result['synced']} synced, "
-                            f"{result['skipped']} skipped, {result['failed']} failed[/green]"
+                            f"[green]Album '{album_name}': +{result['added']} added, "
+                            f"-{result['removed']} removed, ~{result['renamed']} reordered, "
+                            f"{result['updated']} updated, {result['recaptioned']} recaptioned, "
+                            f"{result['failed']} failed[/green]"
                         )
                     except Exception as e:
                         console.print(f"[red]Error syncing album '{album_name}': {e}[/red]")

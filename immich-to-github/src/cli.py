@@ -138,29 +138,32 @@ def sync(album, tag, sync_all, dry_run, force, config, verbose):
     type=click.Path(exists=True),
 )
 def status(config):
-    """Show sync status and statistics."""
+    """Show sync status from the per-album manifests in the working clone."""
     try:
+        import json
+
         cfg = Config(config)
+        work = Path(cfg.git_work_dir)
 
-        # Load state
-        from .state_manager import SyncState
-
-        state = SyncState(cfg.state_file_path, cfg.state_backup_enabled)
-        stats = state.get_stats()
-
-        # Display status
         console.print("\n[bold]Sync Status[/bold]")
-        console.print(f"  • Total synced assets: {stats['total_synced']}")
-        console.print(f"  • Last sync: {stats['last_sync'] or 'Never'}")
-        console.print(f"  • State file: {cfg.state_file_path}")
+        console.print(f"  • Working clone: {work}")
 
-        # Show recent synced assets
-        if stats['total_synced'] > 0:
-            console.print("\n[bold]Recent synced assets:[/bold]")
-            synced = state.get_all_synced_assets()
-            # Show last 10
-            for asset_id, data in list(synced.items())[-10:]:
-                console.print(f"  • {data['github_path']} (synced: {data['synced_at'][:10]})")
+        found = False
+        for album_name, folder in cfg.album_mappings.items():
+            manifest = work / folder / "index.json"
+            if not manifest.exists():
+                console.print(f"  • {album_name} → {folder}: [dim]not synced yet[/dim]")
+                continue
+            found = True
+            data = json.loads(manifest.read_text())
+            count = data.get("count", len(data.get("photos", [])))
+            console.print(
+                f"  • {album_name} → {folder}: {count} photo(s), "
+                f"generated {data.get('generated_at', 'unknown')}"
+            )
+
+        if not found:
+            console.print("[dim]No manifests found — run a sync first.[/dim]")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -205,16 +208,26 @@ def test(config):
     help="Path to configuration file",
     type=click.Path(exists=True),
 )
-@click.confirmation_option(prompt="Are you sure you want to reset the sync state?")
+@click.confirmation_option(
+    prompt="Delete the local working clone? Next sync re-bootstraps from Immich."
+)
 def reset(config):
-    """Reset sync state (clear all tracked assets)."""
-    try:
-        cfg = Config(config)
-        from .state_manager import SyncState
+    """Remove the local working clone so the next sync rebuilds it.
 
-        state = SyncState(cfg.state_file_path, cfg.state_backup_enabled)
-        state.reset()
-        console.print("[green]Sync state has been reset[/green]")
+    There is no incremental sync state to clear in the reconcile model — the
+    album is the source of truth. This just drops the working clone; the next
+    run bootstraps a fresh one and force-pushes a clean snapshot.
+    """
+    try:
+        import shutil
+
+        cfg = Config(config)
+        work = Path(cfg.git_work_dir)
+        if work.exists():
+            shutil.rmtree(work)
+            console.print(f"[green]Removed working clone: {work}[/green]")
+        else:
+            console.print(f"[dim]Nothing to remove ({work} does not exist)[/dim]")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -239,22 +252,28 @@ def daemon(config):
 
 
 def _display_results_table(results):
-    """Display sync results in a table."""
-    table = Table(title="Sync Results")
-    table.add_column("Tag/Album", style="cyan")
+    """Display reconcile results in a table."""
+    table = Table(title="Reconcile Results")
+    table.add_column("Album", style="cyan")
     table.add_column("Total", style="dim")
-    table.add_column("Synced", style="green")
-    table.add_column("Skipped", style="yellow")
+    table.add_column("Added", style="green")
+    table.add_column("Removed", style="red")
+    table.add_column("Reordered", style="blue")
+    table.add_column("Updated", style="magenta")
+    table.add_column("Captions", style="yellow")
     table.add_column("Failed", style="red")
 
     for result in results:
-        name = result.get("tag") or result.get("album", "Unknown")
+        name = result.get("album") or result.get("tag", "Unknown")
         table.add_row(
             name,
-            str(result["total"]),
-            str(result["synced"]),
-            str(result["skipped"]),
-            str(result["failed"]),
+            str(result.get("total", 0)),
+            str(result.get("added", 0)),
+            str(result.get("removed", 0)),
+            str(result.get("renamed", 0)),
+            str(result.get("updated", 0)),
+            str(result.get("recaptioned", 0)),
+            str(result.get("failed", 0)),
         )
 
     console.print("\n")

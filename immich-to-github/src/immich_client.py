@@ -19,6 +19,9 @@ class ImmichAsset:
         self.original_filename: str = data.get("originalFileName", "unknown.jpg")
         self.file_created_at: str = data.get("fileCreatedAt", "")
         self.file_modified_at: str = data.get("fileModifiedAt", "")
+        # Note: Immich does NOT bump updatedAt on a description edit, so this is
+        # unreliable as a caption-change signal — kept only as informational.
+        self.updated_at: str = data.get("updatedAt", "")
         # Safely handle tags - they might be missing or not in the expected format
         tags_data = data.get("tags", [])
         if isinstance(tags_data, list):
@@ -243,6 +246,24 @@ class ImmichClient:
                     break
                 page = int(next_page)
         return excluded
+
+    async def get_asset_description(self, asset_id: str) -> str:
+        """Return an asset's caption (``exifInfo.description``), or "".
+
+        The album search API trims exifInfo, so the caption is only available
+        from the per-asset endpoint. Failures degrade to an empty caption
+        rather than aborting the sync.
+        """
+        try:
+            response = await self.client.get(f"{self.api_url}/api/assets/{asset_id}")
+            response.raise_for_status()
+            exif = response.json().get("exifInfo") or {}
+            return exif.get("description") or ""
+        except Exception as e:
+            console.print(
+                f"[yellow]Could not read description for {asset_id}: {e}[/yellow]"
+            )
+            return ""
 
     async def download_asset(
         self, asset_id: str, output_path: Path, filename: Optional[str] = None
